@@ -48,22 +48,26 @@ def _raw_get(tokens: dict, path: str, params: dict | None = None) -> Any:
 
 
 def sf_get(path: str, params: dict | None = None) -> Any:
-    """GET with automatic token refresh on 401 and readable Salesforce errors."""
+    """GET with automatic token refresh on expiry and readable Salesforce errors."""
     tokens = auth.load_tokens()
     try:
         return _raw_get(tokens, path, params)
     except urllib.error.HTTPError as e:
-        if e.code == 401:
+        body = e.read().decode(errors="replace")
+        # REST endpoints answer an expired token with 401, but the OAuth
+        # userinfo endpoint (used by whoami) answers 403 Bad_OAuth_Token.
+        if e.code == 401 or (e.code == 403 and "Bad_OAuth_Token" in body):
             tokens = auth.refresh_access_token(tokens)
             try:
                 return _raw_get(tokens, path, params)
             except urllib.error.HTTPError as e2:
                 raise RuntimeError(_describe_http_error(e2)) from None
-        raise RuntimeError(_describe_http_error(e)) from None
+        raise RuntimeError(_describe_http_error(e, body)) from None
 
 
-def _describe_http_error(e: urllib.error.HTTPError) -> str:
-    body = e.read().decode(errors="replace")
+def _describe_http_error(e: urllib.error.HTTPError, body: str | None = None) -> str:
+    if body is None:
+        body = e.read().decode(errors="replace")
     try:
         parsed = json.loads(body)
         if isinstance(parsed, list) and parsed:
