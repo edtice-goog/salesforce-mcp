@@ -2,7 +2,9 @@
 via the REST API.
 
 All tools issue GET requests only (query/describe/search/fetch); nothing here
-can create, update, or delete Salesforce data.
+can create, update, or delete Salesforce data. One tool, save_attachment, writes
+a downloaded file to the local disk, and only into the directory SF_MCP_SAVE_DIR
+names; it never returns the file's content.
 
 Auth: OAuth tokens stored by login.py (see that file); access tokens are
 refreshed automatically when they expire.
@@ -17,7 +19,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -35,8 +40,8 @@ mcp = FastMCP("salesforce")
 
 # --- REST plumbing ----------------------------------------------------------
 
-def _raw_get(tokens: dict, path: str, params: dict | None = None) -> Any:
-    """GET a REST path (absolute or relative to the instance), parsed JSON."""
+def _raw_get(tokens: dict, path: str, params: dict | None = None, raw: bool = False) -> Any:
+    """GET a REST path (absolute or relative to the instance): parsed JSON, or the bytes with raw=True."""
     url = path if path.startswith("http") else tokens["instance_url"].rstrip("/") + path
     if params:
         url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
@@ -44,14 +49,15 @@ def _raw_get(tokens: dict, path: str, params: dict | None = None) -> Any:
         url, headers={"Authorization": f"Bearer {tokens['access_token']}"}
     )
     with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read().decode())
+        data = resp.read()
+        return data if raw else json.loads(data.decode())
 
 
-def sf_get(path: str, params: dict | None = None) -> Any:
+def sf_get(path: str, params: dict | None = None, raw: bool = False) -> Any:
     """GET with automatic token refresh on expiry and readable Salesforce errors."""
     tokens = auth.load_tokens()
     try:
-        return _raw_get(tokens, path, params)
+        return _raw_get(tokens, path, params, raw)
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
         # REST endpoints answer an expired token with 401, but the OAuth
@@ -59,7 +65,7 @@ def sf_get(path: str, params: dict | None = None) -> Any:
         if e.code == 401 or (e.code == 403 and "Bad_OAuth_Token" in body):
             tokens = auth.refresh_access_token(tokens)
             try:
-                return _raw_get(tokens, path, params)
+                return _raw_get(tokens, path, params, raw)
             except urllib.error.HTTPError as e2:
                 raise RuntimeError(_describe_http_error(e2)) from None
         raise RuntimeError(_describe_http_error(e, body)) from None
@@ -259,6 +265,59 @@ def get_record(object_name: str, record_id: str, fields: str = "") -> dict:
         f"/services/data/{api_version()}/sobjects/{object_name}/{record_id}", params
     )
     return _strip_attributes(data)
+
+
+SAVE_DIR_ENV = "SF_MCP_SAVE_DIR"
+_FILE_IDS = {  # Id prefix -> (object, name field, extension field, body field)
+    "00P": ("Attachment", "Name", None, "Body"),
+    "068": ("ContentVersion", "Title", "FileExtension", "VersionData"),
+}
+
+
+def _safe_name(name: str) -> str:
+    """A plain file name: no directory part, no characters Windows refuses."""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", os.path.basename((name or "").replace("\\", "/"))).strip(" .")
+    if not name:
+        raise RuntimeError("the file has no usable name")
+    return name
+
+
+@mcp.tool()
+def save_attachment(file_id: str) -> dict:
+    """Save one file attached in Salesforce (an Attachment, Id 00P..., or a
+    ContentVersion, Id 068...) to the local disk WITHOUT returning its content.
+
+    Off unless the server's environment sets SF_MCP_SAVE_DIR: the file goes to
+    <SF_MCP_SAVE_DIR>/<file_id>/<its name>. The answer is the path, name, size,
+    SHA-256 and parent record only, so a licence key or any other content never
+    enters the conversation. Salesforce is only read (a GET of the file's body).
+    """
+    save_dir = os.environ.get(SAVE_DIR_ENV)
+    if not save_dir:
+        raise RuntimeError(f"save_attachment is off: the server's environment sets no {SAVE_DIR_ENV}")
+    file_id = (file_id or "").strip()
+    kind = _FILE_IDS.get(file_id[:3])
+    if not kind or not re.fullmatch(r"[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?", file_id):
+        raise RuntimeError("not an Attachment (00P...) or ContentVersion (068...) Id: %r" % file_id)
+    obj, name_field, ext_field, body_field = kind
+    base = f"/services/data/{api_version()}/sobjects/{obj}/{file_id}"
+    fields = [name_field] + ([ext_field] if ext_field else []) + (["ParentId", "ContentType"] if obj == "Attachment"
+                                                                   else ["ContentDocumentId"])
+    meta = sf_get(base, {"fields": ",".join(fields)})
+    name = meta.get(name_field) or file_id
+    if ext_field and meta.get(ext_field) and not name.lower().endswith("." + meta[ext_field].lower()):
+        name += "." + meta[ext_field]
+    name = _safe_name(name)
+    body = sf_get(f"{base}/{body_field}", raw=True)
+    dest_dir = os.path.join(save_dir, file_id)
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, name)
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(body)
+    return {"path": os.path.abspath(dest), "name": name, "bytes": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "parent_id": meta.get("ParentId") or meta.get("ContentDocumentId")}
 
 
 # --- Selftest / entry point -------------------------------------------------

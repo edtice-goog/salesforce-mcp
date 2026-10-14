@@ -3,8 +3,8 @@
 Read-only [MCP](https://modelcontextprotocol.io) server for Salesforce, built
 for the sig-synopsys org (`https://sig-synopsys.my.salesforce.com`) but
 usable against any org. All tools are GET-only — SOQL/SOSL queries, object
-describes, and record fetches. **Nothing in this server can write to
-Salesforce.**
+describes, record fetches, and saving an attached file. **Nothing in this
+server can write to Salesforce.**
 
 Auth is the standard Salesforce browser login (OAuth 2.0 web-server flow with
 PKCE, via the same public connected app the Salesforce CLI uses), so it works
@@ -56,12 +56,15 @@ with SSO/Okta and never sees your password. Tokens are stored in
 | `list_objects` | Queryable objects, filterable by name |
 | `describe_object` | Fields, picklist values, relationships for one object |
 | `get_record` | One record by 15/18-char Id |
+| `save_attachment` | Saves one attached file (Attachment `00P...` or ContentVersion `068...`) into `SF_MCP_SAVE_DIR`, and answers with its path, size and SHA-256 only, never its content. Off unless `SF_MCP_SAVE_DIR` is set |
 
 ## Configuration
 
 Environment variables (only needed to deviate from the defaults):
 
 - `SF_MCP_LOGIN_URL` — org my-domain login URL (default: sig-synopsys).
+- `SF_MCP_SAVE_DIR` — the directory `save_attachment` may write to (each file
+  goes to `<dir>/<file id>/<name>`). Unset, the tool refuses.
 - `SF_MCP_CLIENT_ID` / `SF_MCP_CLIENT_SECRET` — use your own Connected App
   instead of the Salesforce CLI's public `PlatformCLI` app. Needed only if
   your org blocks PlatformCLI. Your app needs OAuth callback
