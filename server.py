@@ -1,4 +1,4 @@
-"""salesforce MCP server — read-only access to the sig-synopsys Salesforce org
+"""salesforce MCP server — read-only access to the Black Duck Salesforce org
 via the REST API.
 
 All tools issue GET requests only (query/describe/search/fetch); nothing here

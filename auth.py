@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_LOGIN_URL = os.environ.get(
-    "SF_MCP_LOGIN_URL", "https://sig-synopsys.my.salesforce.com"
+    "SF_MCP_LOGIN_URL", "https://blackduck.my.salesforce.com"
 )
 CLIENT_ID = os.environ.get("SF_MCP_CLIENT_ID", "PlatformCLI")
 CLIENT_SECRET = os.environ.get("SF_MCP_CLIENT_SECRET", "")
