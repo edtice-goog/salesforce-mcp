@@ -7,7 +7,7 @@ saves them for server.py to use. Your password is only ever typed into
 Salesforce's own login page in your browser.
 
 Usage:
-    py login.py [--login-url https://sig-synopsys.my.salesforce.com] [--timeout 1800]
+    py login.py [--login-url https://blackduck.my.salesforce.com] [--timeout 1800]
 """
 from __future__ import annotations
 

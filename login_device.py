@@ -6,7 +6,7 @@ script polls until Salesforce reports the grant, then saves tokens for
 server.py. Your password is only ever typed into Salesforce's own login page.
 
 Usage:
-    py login_device.py [--login-url https://sig-synopsys.my.salesforce.com] [--timeout 1200]
+    py login_device.py [--login-url https://blackduck.my.salesforce.com] [--timeout 1200]
 """
 from __future__ import annotations
 

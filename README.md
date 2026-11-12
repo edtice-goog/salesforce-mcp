@@ -1,8 +1,8 @@
 # salesforce-mcp
 
 Read-only [MCP](https://modelcontextprotocol.io) server for Salesforce, built
-for the sig-synopsys org (`https://sig-synopsys.my.salesforce.com`) but
-usable against any org. All tools are GET-only — SOQL/SOSL queries, object
+for the Black Duck Software org (`https://blackduck.my.salesforce.com`; in the
+browser, `https://blackduck.lightning.force.com/`) but usable against any org. All tools are GET-only — SOQL/SOSL queries, object
 describes, record fetches, and saving an attached file. **Nothing in this
 server can write to Salesforce.**
 
@@ -62,7 +62,9 @@ with SSO/Okta and never sees your password. Tokens are stored in
 
 Environment variables (only needed to deviate from the defaults):
 
-- `SF_MCP_LOGIN_URL` — org my-domain login URL (default: sig-synopsys).
+- `SF_MCP_LOGIN_URL` — org my-domain login URL (default:
+  `https://blackduck.my.salesforce.com`). Use the `my.salesforce.com` form,
+  not the `lightning.force.com` address — OAuth and the REST API live there.
 - `SF_MCP_SAVE_DIR` — the directory `save_attachment` may write to (each file
   goes to `<dir>/<file id>/<name>`). Unset, the tool refuses.
 - `SF_MCP_CLIENT_ID` / `SF_MCP_CLIENT_SECRET` — use your own Connected App
@@ -78,12 +80,16 @@ in (for the desktop app, an `"env"` block next to `"command"` in the config).
 - `server.py` — the MCP server (STDIO); `--selftest` for a connection check
 - `login.py` — browser OAuth authorization; re-run if tokens are revoked
 - `login_device.py` — device-flow variant (no localhost redirect); note the
-  sig-synopsys org has device flow disabled for PlatformCLI, so this needs a
+  former sig-synopsys org had device flow disabled for PlatformCLI, so this needs a
   custom Connected App with device flow enabled
 - `auth.py` — token storage/refresh
 - `install.py` — registers the server in the Claude desktop app config
 
 ## Troubleshooting
+
+- **`invalid_grant: inactive user` after the 2026 tenant move** — your saved
+  tokens are for the old sig-synopsys org. Run `py login.py` to sign in to
+  the Black Duck org.
 
 - **"No Salesforce tokens found"** — run `py login.py`.
 - **Login page errors or hangs at the end** — the localhost listener wasn't
