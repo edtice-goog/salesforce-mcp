@@ -1,10 +1,16 @@
-"""salesforce MCP server — read-only access to the Black Duck Salesforce org
-via the REST API.
+"""salesforce MCP server — access to the Black Duck Salesforce org via the
+REST API. Read-only by default.
 
-All tools issue GET requests only (query/describe/search/fetch); nothing here
-can create, update, or delete Salesforce data. One tool, save_attachment, writes
-a downloaded file to the local disk, and only into the directory SF_MCP_SAVE_DIR
-names; it never returns the file's content.
+By default all tools issue GET requests only (query/describe/search/fetch);
+nothing can create, update, or delete Salesforce data. One tool,
+save_attachment, writes a downloaded file to the local disk, and only into the
+directory SF_MCP_SAVE_DIR names; it never returns the file's content.
+
+Write mode: when the server's environment sets SF_MCP_ALLOW_WRITES=1, two
+extra tools exist — create_record and update_record. There is deliberately no
+delete, no bulk write, and no Apex execution. Every write is appended to
+~\\.salesforce-mcp\\writes.log (for updates, with the fields' previous values,
+so a bad write can be undone by hand).
 
 Auth: OAuth tokens stored by login.py (see that file); access tokens are
 refreshed automatically when they expire.
@@ -320,6 +326,120 @@ def save_attachment(file_id: str) -> dict:
             "parent_id": meta.get("ParentId") or meta.get("ContentDocumentId")}
 
 
+# --- Write mode (opt-in) ----------------------------------------------------
+
+WRITES_ENV = "SF_MCP_ALLOW_WRITES"
+WRITES_ENABLED = os.environ.get(WRITES_ENV, "").strip().lower() in ("1", "true", "yes")
+WRITE_LOG = auth.TOKEN_FILE.parent / "writes.log"
+
+_OBJECT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,159}$")
+_RECORD_ID_RE = re.compile(r"^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$")
+
+
+def _raw_send(tokens: dict, method: str, path: str, body: dict) -> Any:
+    url = path if path.startswith("http") else tokens["instance_url"].rstrip("/") + path
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        method=method,
+        headers={
+            "Authorization": f"Bearer {tokens['access_token']}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = resp.read()
+        return json.loads(data.decode()) if data else None
+
+
+def sf_send(method: str, path: str, body: dict) -> Any:
+    """POST/PATCH with the same token-refresh and error handling as sf_get."""
+    tokens = auth.load_tokens()
+    try:
+        return _raw_send(tokens, method, path, body)
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode(errors="replace")
+        if e.code == 401 or (e.code == 403 and "Bad_OAuth_Token" in err_body):
+            tokens = auth.refresh_access_token(tokens)
+            try:
+                return _raw_send(tokens, method, path, body)
+            except urllib.error.HTTPError as e2:
+                raise RuntimeError(_describe_http_error(e2)) from None
+        raise RuntimeError(_describe_http_error(e, err_body)) from None
+
+
+def _audit(entry: dict) -> None:
+    import datetime
+    entry = {"ts": datetime.datetime.now().astimezone().isoformat(), **entry}
+    WRITE_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(WRITE_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, default=str) + "\n")
+
+
+def _check_write_args(object_name: str, fields: dict) -> None:
+    if not _OBJECT_RE.fullmatch(object_name or ""):
+        raise RuntimeError(f"not a valid sObject API name: {object_name!r}")
+    if not isinstance(fields, dict) or not fields:
+        raise RuntimeError("fields must be a non-empty object of {API field name: value}")
+    bad = [k for k in fields if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]{0,159}", k)]
+    if bad:
+        raise RuntimeError(f"not valid field API names: {bad}")
+
+
+if WRITES_ENABLED:
+
+    @mcp.tool()
+    def create_record(object_name: str, fields: dict) -> dict:
+        """Create ONE record in the live Salesforce org (write mode).
+
+        fields maps API field names to values, e.g.
+        {"Name": "Acme-", "StageName": "0 - Prospecting", "CloseDate": "2027-01-31"}.
+        Use describe_object first to map UI labels to API names and valid
+        picklist values; don't guess. The write is appended to a local audit
+        log. This changes production data — create only what the user asked for.
+        """
+        _check_write_args(object_name, fields)
+        resp = sf_send("POST", f"/services/data/{api_version()}/sobjects/{object_name}", fields)
+        if not (resp or {}).get("success", False):
+            raise RuntimeError(f"create failed: {resp}")
+        _audit({"op": "create", "object": object_name, "id": resp.get("id"), "fields": fields})
+        return {"id": resp.get("id"), "object": object_name, "created": True}
+
+    @mcp.tool()
+    def update_record(object_name: str, record_id: str, fields: dict) -> dict:
+        """Update fields on ONE existing record (write mode).
+
+        fields maps API field names to new values; only those fields change.
+        Use describe_object first to map UI labels to API names and valid
+        picklist values; don't guess. The record's previous values for those
+        fields are read first and appended to a local audit log with the new
+        ones, so a wrong update can be reverted. This changes production
+        data — change only what the user asked for.
+        """
+        _check_write_args(object_name, fields)
+        record_id = (record_id or "").strip()
+        if not _RECORD_ID_RE.fullmatch(record_id):
+            raise RuntimeError(f"not a valid record Id: {record_id!r}")
+        plain = [k for k in fields if "." not in k]
+        before = {}
+        try:
+            before = {
+                k: v for k, v in get_record(object_name, record_id, ",".join(plain)).items()
+                if k in fields
+            }
+        except Exception:
+            pass  # auditing "before" is best-effort; the update itself still proceeds
+        sf_send(
+            "PATCH",
+            f"/services/data/{api_version()}/sobjects/{object_name}/{record_id}",
+            fields,
+        )
+        _audit({"op": "update", "object": object_name, "id": record_id,
+                "before": before, "after": fields})
+        return {"id": record_id, "object": object_name, "updated": sorted(fields),
+                "previous_values": before}
+
+
 # --- Selftest / entry point -------------------------------------------------
 
 def selftest() -> int:
@@ -330,6 +450,7 @@ def selftest() -> int:
         return 1
     print(f"Connected as {me['username']} (org {me['organization_id']}) "
           f"at {me['instance_url']}, API {me['api_version']}")
+    print(f"Write mode: {'ENABLED' if WRITES_ENABLED else 'off (read-only)'}")
     q = soql_query("SELECT Id, Name FROM Account ORDER BY LastModifiedDate DESC LIMIT 3")
     print(f"Sample query returned {q['returned']} of {q['total_size']} accounts:")
     for r in q["records"]:

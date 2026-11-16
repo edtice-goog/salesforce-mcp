@@ -1,10 +1,11 @@
 # salesforce-mcp
 
-Read-only [MCP](https://modelcontextprotocol.io) server for Salesforce, built
+[MCP](https://modelcontextprotocol.io) server for Salesforce, built
 for the Black Duck Software org (`https://blackduck.my.salesforce.com`; in the
-browser, `https://blackduck.lightning.force.com/`) but usable against any org. All tools are GET-only — SOQL/SOSL queries, object
-describes, record fetches, and saving an attached file. **Nothing in this
-server can write to Salesforce.**
+browser, `https://blackduck.lightning.force.com/`) but usable against any org.
+**Read-only by default** — SOQL/SOSL queries, object describes, record
+fetches, and saving an attached file; nothing can write to Salesforce unless
+you opt in to write mode (below).
 
 Auth is the standard Salesforce browser login (OAuth 2.0 web-server flow with
 PKCE, via the same public connected app the Salesforce CLI uses), so it works
@@ -57,6 +58,26 @@ with SSO/Okta and never sees your password. Tokens are stored in
 | `describe_object` | Fields, picklist values, relationships for one object |
 | `get_record` | One record by 15/18-char Id |
 | `save_attachment` | Saves one attached file (Attachment `00P...` or ContentVersion `068...`) into `SF_MCP_SAVE_DIR`, and answers with its path, size and SHA-256 only, never its content. Off unless `SF_MCP_SAVE_DIR` is set |
+| `create_record` | *Write mode only.* Creates one record from `{API field name: value}` |
+| `update_record` | *Write mode only.* Updates named fields on one record; reads and reports their previous values first |
+
+## Write mode (opt-in)
+
+With `SF_MCP_ALLOW_WRITES=1` in the server's environment, `create_record` and
+`update_record` exist; otherwise they don't. Scope is deliberately narrow:
+one record per call, **no delete, no bulk writes, no Apex**. Every write is
+appended to `~\.salesforce-mcp\writes.log` — updates with the previous values
+of the changed fields, so a mistake can be reverted by hand.
+
+To run a write-enabled registration for Claude Code:
+
+```
+claude mcp add --scope user -e SF_MCP_ALLOW_WRITES=1 salesforce -- py C:\path\to\salesforce-mcp\server.py
+```
+
+Writes go through the signed-in user's own Salesforce permissions, and
+validation rules, required fields, and stage gates still apply — the server
+cannot bypass anything the UI would block.
 
 ## Configuration
 
@@ -67,6 +88,8 @@ Environment variables (only needed to deviate from the defaults):
   not the `lightning.force.com` address — OAuth and the REST API live there.
 - `SF_MCP_SAVE_DIR` — the directory `save_attachment` may write to (each file
   goes to `<dir>/<file id>/<name>`). Unset, the tool refuses.
+- `SF_MCP_ALLOW_WRITES` — set to `1` to enable `create_record` /
+  `update_record` (see Write mode above). Unset, the server is read-only.
 - `SF_MCP_CLIENT_ID` / `SF_MCP_CLIENT_SECRET` — use your own Connected App
   instead of the Salesforce CLI's public `PlatformCLI` app. Needed only if
   your org blocks PlatformCLI. Your app needs OAuth callback
